@@ -40,6 +40,10 @@ class Newspack_Supporters {
 		add_action( 'init', [ __CLASS__, 'add_supporters_shortcode' ] );
 		add_action( 'add_meta_boxes', [ __CLASS__, 'add_meta_boxes' ] );
 		add_action( 'save_post', [ __CLASS__, 'save_meta_boxes' ] );
+		add_action( 'save_post', [ __CLASS__, 'invalidate_cache' ] );
+		add_action( 'deleted_post', [ __CLASS__, 'invalidate_cache' ] );
+		add_action( 'set_object_terms', [ __CLASS__, 'invalidate_cache' ], 10, 4 );
+		add_action( 'deleted_term_relationships', [ __CLASS__, 'invalidate_cache' ] );
 	}
 
 	/**
@@ -149,12 +153,82 @@ class Newspack_Supporters {
 	}
 
 	/**
+	 * Invalidate cache when supporters or their terms are modified.
+	 *
+	 * @param int $post_id The post ID.
+	 */
+	public static function invalidate_cache( $post_id = null ) {
+		// Only invalidate if it's a supporter post or if we're dealing with supporter terms
+		if ( $post_id && self::POST_TYPE !== get_post_type( $post_id ) ) {
+			return;
+		}
+		
+		// Delete all supporter cache keys
+		global $wpdb;
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
+				'_transient_newspack_supporters_%'
+			)
+		);
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
+				'_transient_timeout_newspack_supporters_%'
+			)
+		);
+	}
+
+	/**
+	 * Generate cache key for supporters shortcode.
+	 *
+	 * @param array $atts Shortcode attributes.
+	 * @return string Cache key.
+	 */
+	private static function get_cache_key( $atts ) {
+		$cache_data = [
+			'type'       => ! empty( $atts['type'] ) ? sanitize_text_field( $atts['type'] ) : '',
+			'columns'    => ! empty( $atts['columns'] ) ? intval( $atts['columns'] ) : 3,
+			'show_links' => isset( $atts['show_links'] ) && 'false' === strtolower( $atts['show_links'] ) ? false : true,
+		];
+		
+		return 'newspack_supporters_' . md5( wp_json_encode( $cache_data ) );
+	}
+
+	/**
 	 * Process the 'supporters' shortcode.
 	 *
 	 * @param array $atts The shortcode supports a 'type' param for limiting to a specific Supporter Type.
 	 * @return string HTML shortcode output.
 	 */
 	public static function render_supporters_shortcode( $atts ) {
+		// Skip cache for logged-in users with edit capabilities
+		if ( is_user_logged_in() && current_user_can( 'edit_posts' ) ) {
+			return self::render_supporters_html( $atts );
+		}
+
+		$cache_key = self::get_cache_key( $atts );
+		$cached_output = get_transient( $cache_key );
+		
+		if ( false !== $cached_output ) {
+			return $cached_output;
+		}
+
+		$output = self::render_supporters_html( $atts );
+		
+		// Cache for 1 hour (3600 seconds)
+		set_transient( $cache_key, $output, HOUR_IN_SECONDS );
+		
+		return $output;
+	}
+
+	/**
+	 * Render the supporters HTML (uncached version).
+	 *
+	 * @param array $atts Shortcode attributes.
+	 * @return string HTML output.
+	 */
+	private static function render_supporters_html( $atts ) {
 		$type        = ! empty( $atts['type'] ) ? sanitize_text_field( $atts['type'] ) : '';
 		$num_columns = ! empty( $atts['columns'] ) ? intval( $atts['columns'] ) : 3;
 		$show_links  = isset( $atts['show_links'] ) && 'false' === strtolower( $atts['show_links'] ) ? false : true;
